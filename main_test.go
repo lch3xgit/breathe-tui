@@ -80,6 +80,9 @@ func TestHelpAndVersionDoNotStartSession(t *testing.T) {
 			if strings.Contains(stdout.String(), "Inhale") {
 				t.Errorf("stdout = %q, appears to have started a session", stdout.String())
 			}
+			if strings.Contains(stdout.String(), "\x1b[") {
+				t.Errorf("stdout = %q, contains ANSI cursor controls", stdout.String())
+			}
 		})
 	}
 }

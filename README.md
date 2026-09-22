@@ -1,6 +1,6 @@
 # breathe-tui
 
-`breathe-tui` is a tiny, fast terminal breath pacer written in Go. It is in early development; this first pass provides a line-oriented program rather than the planned animated terminal interface.
+`breathe-tui` is a tiny, fast terminal breath pacer written in Go. It is in early development and now includes a compact interactive terminal display.
 
 ## Practices
 
@@ -25,4 +25,6 @@ go run . calm
 go run . help
 ```
 
-The project is deliberately small, offline, and standard-library-only. It has no accounts, network services, persistence, or connection to the GoodBeet/Breathe web application. Packaging an installed `breathe` command, animated output, and interactive terminal controls are future work.
+In an interactive terminal, press Space to pause or resume and `q` to quit. Ctrl+C also exits. Redirected or non-terminal execution retains simple line-oriented output without ANSI cursor controls.
+
+The project is deliberately small and offline. Its only external dependency is `golang.org/x/term`, used for raw terminal input, terminal detection, state restoration, and terminal dimensions. It has no accounts, network services, persistence, or connection to the GoodBeet/Breathe web application. Packaging an installed `breathe` command remains future work.

@@ -39,6 +39,16 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	case commandVersion:
 		fmt.Fprintf(stdout, "breathe %s\n", version)
 	case commandRun:
+		if terminalOutput, ok := stdout.(*os.File); ok && interactiveTerminal(os.Stdin, terminalOutput) {
+			handled, err := runInteractiveSession(cmd.practice, os.Stdin, terminalOutput)
+			if err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				return 1
+			}
+			if handled {
+				return 0
+			}
+		}
 		if err := runSession(cmd.practice, LineOutput{Writer: stdout}); err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1

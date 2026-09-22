@@ -10,6 +10,7 @@ type SessionState int
 
 const (
 	SessionRunning SessionState = iota
+	SessionPaused
 	SessionCompleted
 )
 
@@ -30,6 +31,7 @@ type Session struct {
 	TargetDuration    time.Duration
 	TargetCycles      int
 	StartedAt         time.Time
+	PausedAt          time.Time
 	State             SessionState
 }
 
@@ -78,6 +80,101 @@ func (s *Session) Advance(now time.Time) []PhaseStart {
 		})
 	}
 	return starts
+}
+
+func (s *Session) Pause(now time.Time) []PhaseStart {
+	if s.State != SessionRunning {
+		return nil
+	}
+
+	starts := s.Advance(now)
+	if s.State == SessionRunning {
+		s.PausedAt = now
+		s.State = SessionPaused
+	}
+	return starts
+}
+
+func (s *Session) Resume(now time.Time) bool {
+	if s.State != SessionPaused || now.Before(s.PausedAt) {
+		return false
+	}
+
+	pauseDuration := now.Sub(s.PausedAt)
+	s.StartedAt = s.StartedAt.Add(pauseDuration)
+	s.PhaseStartedAt = s.PhaseStartedAt.Add(pauseDuration)
+	s.PhaseDeadline = s.PhaseDeadline.Add(pauseDuration)
+	s.PausedAt = time.Time{}
+	s.State = SessionRunning
+	return true
+}
+
+func (s *Session) PhaseRemaining(now time.Time) time.Duration {
+	if s.State == SessionCompleted {
+		return 0
+	}
+	remaining := s.PhaseDeadline.Sub(s.activeTime(now))
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+func (s *Session) PhaseProgress(now time.Time) float64 {
+	elapsed := s.activeTime(now).Sub(s.PhaseStartedAt)
+	progress := float64(elapsed) / float64(s.CurrentPhase.Duration)
+	if progress < 0 {
+		return 0
+	}
+	if progress > 1 {
+		return 1
+	}
+	return progress
+}
+
+func (s *Session) ScheduledEnd() time.Time {
+	cycleDuration := s.cycleDuration()
+	cycles := s.TargetCycles
+	if cycles == 0 {
+		cycles = int(s.TargetDuration / cycleDuration)
+		if s.TargetDuration%cycleDuration != 0 {
+			cycles++
+		}
+	}
+	return s.StartedAt.Add(time.Duration(cycles) * cycleDuration)
+}
+
+func (s *Session) SessionRemaining(now time.Time) time.Duration {
+	if s.State == SessionCompleted {
+		return 0
+	}
+	remaining := s.ScheduledEnd().Sub(s.activeTime(now))
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+func (s *Session) CurrentCycle() int {
+	if s.State == SessionCompleted {
+		return s.CompletedCycles
+	}
+	return s.CompletedCycles + 1
+}
+
+func (s *Session) activeTime(now time.Time) time.Time {
+	if s.State == SessionPaused {
+		return s.PausedAt
+	}
+	return now
+}
+
+func (s *Session) cycleDuration() time.Duration {
+	var duration time.Duration
+	for _, phase := range s.Practice.Phases {
+		duration += phase.Duration
+	}
+	return duration
 }
 
 func (s *Session) reachedTarget(cycleBoundary time.Time) bool {
