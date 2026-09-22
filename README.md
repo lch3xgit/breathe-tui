@@ -1,31 +1,111 @@
 # breathe-tui
 
-`breathe-tui` is a tiny, fast terminal breath pacer written in Go. It is in early development and includes a compact interactive terminal display.
+`breathe-tui` is a small, offline terminal breath pacer written in Go. The current release line is v0.1.x; command behavior and presentation may still evolve before v1.0.0.
+
+## Features
+
+- Six built-in practices with deterministic, deadline-based timing
+- Compact alternate-screen interface with a persistent wordmark when space permits
+- Bracketed shaded breath meter, responsive sizing, and clean shell restoration
+- Space to pause or resume, with paused time excluded from the session
+- Optional terminal bell at live phase changes
+- Plain line-oriented output when interactive terminal mode is unavailable
 
 ## Practices
 
-Run one of six built-in practices:
+Patterns are listed as inhale : hold full : exhale : hold empty, in seconds. A zero means that phase is omitted.
 
-- `coherence` — inhale 5.5 seconds, exhale 5.5 seconds
-- `calm` — inhale 4 seconds, exhale 6 seconds
-- `upshift` — inhale 6 seconds, exhale 4 seconds
-- `box` — inhale, hold full, exhale, and hold empty for 4 seconds each
-- `circular` — inhale 2 seconds, exhale 2 seconds
-- `478` — inhale 4 seconds, hold full 7 seconds, exhale 8 seconds
+| Command | Practice | Pattern | Default |
+| --- | --- | --- | --- |
+| `coherence` | Coherence | 5.5:0:5.5:0 | ~5 minutes |
+| `calm` | Calm | 4:0:6:0 | 5 minutes |
+| `upshift` | Upshift | 6:0:4:0 | 5 minutes |
+| `box` | Box Breath | 4:4:4:4 | ~5 minutes |
+| `circular` | Circular Flow | 2:0:2:0 | 5 minutes |
+| `478` | 4-7-8 | 4:7:8:0 | 8 breaths |
 
-Running without a practice selects Coherence. The first five practices target five minutes. When that target is reached during a breath cycle, the current cycle finishes before the session ends; a new cycle is not started after the target has been met. The 4-7-8 practice instead runs for exactly eight complete cycles.
+Duration-based sessions treat five minutes as a target and finish the current breath cycle instead of stopping mid-cycle. As a result, Coherence completes at 5:08 and Box Breath at 5:04; Calm, Upshift, and Circular Flow complete at 5:00. The 4-7-8 practice always completes eight full breaths.
 
-## Run locally
+## Usage
 
-Go 1.23 or later is required.
-
-```sh
-go run .
-go run . calm
-go run . --sound box
-go run . help
+```text
+breathe
+breathe coherence
+breathe calm
+breathe upshift
+breathe box
+breathe circular
+breathe 478
+breathe --sound box
+breathe help
+breathe version
 ```
 
-In an interactive terminal, the pacer temporarily uses a dedicated terminal screen. When space permits, its wordmark remains above a compact three-line frame with a bracketed breath meter. Press Space to pause or resume, and `q` to quit. Ctrl+C also exits. The normal shell screen is restored before a one-line session summary is printed. `--sound` emits a terminal bell at live phase changes; whether that becomes an audible click depends on terminal settings. Redirected or non-terminal execution retains simple line-oriented output without ANSI cursor controls or bell bytes.
+Running `breathe` without a practice starts Coherence.
 
-The project is deliberately small and offline. Its only external dependency is `golang.org/x/term`, used for raw terminal input, terminal detection, state restoration, and terminal dimensions. It has no accounts, network services, persistence, or connection to the GoodBeet/Breathe web application. Packaging an installed `breathe` command remains future work.
+Controls in an interactive session:
+
+- Space pauses or resumes.
+- `q` or `Q` ends the session.
+- Ctrl+C ends the session.
+
+`--sound` sends one terminal-bell character at each live phase transition. Whether that produces an audible sound depends on terminal and operating-system settings.
+
+## Install from GitHub Releases
+
+Release archives and `SHA256SUMS` are published on the [GitHub Releases page](https://github.com/lch3xgit/breathe-tui/releases). The v0.1.0 binaries are not code-signed, so the operating system may display a warning. You can inspect the source and verify the archive against the published SHA-256 checksum.
+
+### Windows
+
+Download `breathe_0.1.0_windows_amd64.zip`, extract it, and place `breathe.exe` in a user-owned directory included in `PATH`. Then verify the installation:
+
+```powershell
+breathe version
+```
+
+### macOS and Linux
+
+Download the `.tar.gz` archive matching the operating system and architecture, extract it, and move `breathe` to a user-owned directory in `PATH`. For example, after substituting the downloaded archive name and directory:
+
+```sh
+mkdir -p ~/.local/bin
+tar -xzf breathe_0.1.0_linux_amd64.tar.gz
+install -m 0755 breathe_0.1.0_linux_amd64/breathe ~/.local/bin/breathe
+breathe version
+```
+
+Your shell must include `~/.local/bin` in `PATH`. If needed, ensure the extracted binary is executable with `chmod +x breathe`.
+
+## Build from source
+
+Go 1.23 or newer is required.
+
+```sh
+git clone https://github.com/lch3xgit/breathe-tui.git
+cd breathe-tui
+go test ./...
+go build -o breathe .
+```
+
+On Windows, use `go build -o breathe.exe .`. Move the resulting executable to a directory in `PATH` if desired. Ordinary source builds intentionally report `breathe dev`; official archives inject the release version at link time.
+
+## Development
+
+```sh
+gofmt -w *.go
+go test ./...
+go vet ./...
+go build ./...
+```
+
+## Platform and terminal expectations
+
+Release archives target Windows AMD64, macOS ARM64 and AMD64, and Linux ARM64 and AMD64. The interactive interface expects stdin and stdout to be terminals with ANSI alternate-screen and Unicode support. Redirected or non-TTY execution uses plain output without ANSI controls or bell bytes.
+
+## Scope and limitations
+
+`breathe-tui` is deliberately offline and local. It has no accounts, networking, backend integration, history, persistence, configuration files, or AI features. It is a focused pacer rather than a full-screen application framework.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

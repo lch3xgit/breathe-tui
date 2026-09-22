@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release-version.outputs.version }}
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Validate tag and derive version
+        id: release-version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must match vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}" >/dev/null
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+
+  release:
+    name: Build draft release
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify tag
+        shell: bash
+        run: git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}" >/dev/null
+      - name: Build and package release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          targets=(
+            'windows amd64 zip'
+            'darwin arm64 tar.gz'
+            'darwin amd64 tar.gz'
+            'linux amd64 tar.gz'
+            'linux arm64 tar.gz'
+          )
+
+          for target in "${targets[@]}"; do
+            read -r goos goarch archive_type <<< "$target"
+            artifact="breathe_${RELEASE_VERSION}_${goos}_${goarch}"
+            package_dir="dist/${artifact}"
+            binary='breathe'
+            if [[ "$goos" == 'windows' ]]; then
+              binary='breathe.exe'
+            fi
+
+            mkdir -p "$package_dir"
+            env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags="-s -w -X main.version=${RELEASE_VERSION}" \
+              -o "${package_dir}/${binary}" .
+            cp README.md LICENSE "$package_dir/"
+
+            if [[ "$archive_type" == 'zip' ]]; then
+              (cd dist && zip -q -r "${artifact}.zip" "$artifact")
+            else
+              chmod 0755 "${package_dir}/${binary}"
+              (cd dist && tar -czf "${artifact}.tar.gz" "$artifact")
+            fi
+            rm -rf "$package_dir"
+          done
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          mapfile -t archives < <(find . -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) -printf '%f\n' | sort)
+          if [[ "${#archives[@]}" -ne 5 ]]; then
+            echo "::error::Expected five release archives, found ${#archives[@]}"
+            exit 1
+          fi
+          sha256sum "${archives[@]}" > SHA256SUMS
+      - name: Create draft GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::A GitHub Release already exists for ${RELEASE_TAG}; inspect it before retrying."
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" dist/* \
+            --draft \
+            --generate-notes \
+            --title "breathe-tui ${RELEASE_TAG}" \
+            --verify-tag
