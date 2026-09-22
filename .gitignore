@@ -2,3 +2,5 @@
 /breathe.exe
 /breathe-tui
 /breathe-tui.exe
+/dist/
+/coverage.out

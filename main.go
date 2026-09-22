@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const version = "dev"
+var version = "dev"
 
 type commandKind int
 

@@ -144,6 +144,41 @@ func TestHelpAndVersionDoNotStartSession(t *testing.T) {
 	}
 }
 
+func TestDevelopmentVersionOutput(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runCLI([]string{"version"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "breathe dev\n"; got != want {
+		t.Errorf("version output = %q, want %q", got, want)
+	}
+	assertPlainCommandOutput(t, stdout.String())
+}
+
+func TestInjectedVersionOutput(t *testing.T) {
+	originalVersion := version
+	version = "0.1.0"
+	t.Cleanup(func() { version = originalVersion })
+
+	var stdout, stderr bytes.Buffer
+	if code := runCLI([]string{"--version"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "breathe 0.1.0\n"; got != want {
+		t.Errorf("version output = %q, want %q", got, want)
+	}
+	assertPlainCommandOutput(t, stdout.String())
+}
+
+func assertPlainCommandOutput(t *testing.T, output string) {
+	t.Helper()
+	for _, forbidden := range []string{"\x1b[", "\a"} {
+		if strings.Contains(output, forbidden) {
+			t.Errorf("output = %q, contains terminal control %q", output, forbidden)
+		}
+	}
+}
+
 func TestHelpDescribesTerminalBell(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := runCLI([]string{"help"}, &stdout, &stderr); code != 0 {
