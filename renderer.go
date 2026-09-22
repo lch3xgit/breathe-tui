@@ -8,11 +8,14 @@ import (
 )
 
 const (
-	phaseLabelWidth     = len("HOLD EMPTY")
-	countdownWidth      = len("8.0s")
-	preferredBarMax     = 24
-	preferredFrameWidth = 52
-	framedMinimum       = 28
+	phaseLabelWidth             = len("HOLD EMPTY")
+	countdownWidth              = len("8.0s")
+	preferredMeterInteriorWidth = 20
+	meterBoundaryWidth          = 2
+	meterPaddingWidth           = 2
+	meterFixedWidth             = meterBoundaryWidth + meterPaddingWidth
+	preferredFrameWidth         = 52
+	framedMinimum               = 28
 )
 
 func advanceLiveFrame(session *Session, now time.Time, width int) []string {
@@ -105,8 +108,8 @@ func framedHeader(header string, width int) string {
 }
 
 func framedMiddle(session *Session, now time.Time, width int) string {
-	barWidth := boundedBarWidth(width - middleFixedWidth())
-	return "│ " + progressBar(session.CurrentPhase.Name, session.PhaseProgress(now), barWidth) + "  " + phaseCue(session, now)
+	interiorWidth := boundedMeterInteriorWidth(width - middleFixedWidth())
+	return "│ " + breathMeter(session.CurrentPhase.Name, session.PhaseProgress(now), interiorWidth) + " · " + phaseCue(session, now)
 }
 
 func framedFooter(controls string, width int) string {
@@ -129,7 +132,7 @@ func compactPhaseCue(session *Session, now time.Time) string {
 }
 
 func middleFixedWidth() int {
-	return textWidth("│ ") + textWidth("  ") + countdownWidth + textWidth(" · ") + phaseLabelWidth
+	return textWidth("│ ") + meterFixedWidth + textWidth(" · ") + countdownWidth + textWidth(" · ") + phaseLabelWidth
 }
 
 func effectiveFrameWidth(width int) int {
@@ -162,8 +165,8 @@ func compactControls(controls string) string {
 	return strings.Replace(controls, "space ", "", 1)
 }
 
-func progressBar(phaseName string, progress float64, width int) string {
-	if width <= 0 {
+func breathMeter(phaseName string, progress float64, interiorWidth int) string {
+	if interiorWidth <= 0 {
 		return ""
 	}
 	if progress < 0 {
@@ -176,23 +179,29 @@ func progressBar(phaseName string, progress float64, width int) string {
 	var filled int
 	switch phaseName {
 	case "Hold full":
-		filled = width
+		filled = interiorWidth
 	case "Hold empty":
 		filled = 0
 	case "Exhale":
-		filled = int(math.Round((1 - progress) * float64(width)))
+		filled = int(math.Round((1 - progress) * float64(interiorWidth)))
 	default:
-		filled = int(math.Round(progress * float64(width)))
+		filled = int(math.Round(progress * float64(interiorWidth)))
 	}
-	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > interiorWidth {
+		filled = interiorWidth
+	}
+	return "[ " + strings.Repeat("░", filled) + strings.Repeat(" ", interiorWidth-filled) + " ]"
 }
 
-func boundedBarWidth(available int) int {
+func boundedMeterInteriorWidth(available int) int {
 	if available <= 0 {
 		return 0
 	}
-	if available > preferredBarMax {
-		return preferredBarMax
+	if available > preferredMeterInteriorWidth {
+		return preferredMeterInteriorWidth
 	}
 	return available
 }

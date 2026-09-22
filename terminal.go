@@ -2,10 +2,10 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"time"
 
@@ -17,25 +17,36 @@ const wordmark = `█▄▄▄▄ ▄▄▄▄▄▄▄▄▄▄▄ ▄▄▄▄
 █▄▄▄█▄█     █▄▄▄▄▄█▄▄▄█  █▄▄▄▄█   █▄█▄▄▄▄`
 
 const (
-	ansiHideCursor   = "\x1b[?25l"
-	ansiShowCursor   = "\x1b[?25h"
-	ansiReset        = "\x1b[0m"
-	ansiClearLine    = "\x1b[2K"
-	ansiClearDisplay = "\x1b[2J"
-	ansiHome         = "\x1b[H"
-	splashTime       = time.Second
-	renderInterval   = 50 * time.Millisecond
-	resizeDebounce   = 200 * time.Millisecond
+	ansiEnterAlternate = "\x1b[?1049h"
+	ansiLeaveAlternate = "\x1b[?1049l"
+	ansiHideCursor     = "\x1b[?25l"
+	ansiShowCursor     = "\x1b[?25h"
+	ansiReset          = "\x1b[0m"
+	ansiClearLine      = "\x1b[2K"
+	ansiClearDisplay   = "\x1b[2J"
+	ansiHome           = "\x1b[H"
+	splashTime         = time.Second
+	renderInterval     = 50 * time.Millisecond
+	resizeDebounce     = 200 * time.Millisecond
+	brandedMinHeight   = 9
 )
 
 type terminalLifecycle struct {
-	writer     io.Writer
-	restoreRaw func() error
-	restored   bool
+	writer       io.Writer
+	restoreRaw   func() error
+	started      bool
+	alternate    bool
+	restored     bool
+	summaryWrote bool
 }
 
-func (l *terminalLifecycle) hideCursor() error {
-	_, err := io.WriteString(l.writer, ansiHideCursor)
+func (l *terminalLifecycle) start() error {
+	if l.started {
+		return nil
+	}
+	l.started = true
+	l.alternate = true
+	_, err := io.WriteString(l.writer, ansiEnterAlternate+ansiClearDisplay+ansiHome+ansiHideCursor)
 	return err
 }
 
@@ -44,7 +55,16 @@ func (l *terminalLifecycle) restore() error {
 		return nil
 	}
 	l.restored = true
-	_, writeErr := io.WriteString(l.writer, ansiReset+ansiShowCursor+"\r\n")
+
+	var writeErr error
+	if l.started {
+		sequence := ansiReset + ansiShowCursor
+		if l.alternate {
+			sequence += ansiLeaveAlternate
+			l.alternate = false
+		}
+		_, writeErr = io.WriteString(l.writer, sequence)
+	}
 	var rawErr error
 	if l.restoreRaw != nil {
 		rawErr = l.restoreRaw()
@@ -52,96 +72,159 @@ func (l *terminalLifecycle) restore() error {
 	return errors.Join(writeErr, rawErr)
 }
 
-type frameWriter struct {
-	writer      io.Writer
-	initialized bool
-	anchorValid bool
-	lineCount   int
+func (l *terminalLifecycle) finish(summary string) error {
+	restoreErr := l.restore()
+	if restoreErr != nil || summary == "" || l.summaryWrote {
+		return restoreErr
+	}
+	l.summaryWrote = true
+	_, summaryErr := io.WriteString(l.writer, summary+"\r\n")
+	return errors.Join(restoreErr, summaryErr)
 }
 
-func (f *frameWriter) write(lines []string) error {
-	if len(lines) == 0 {
+type screenSize struct {
+	width  int
+	height int
+}
+
+func normalizedScreenSize(width, height int) screenSize {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	return screenSize{width: width, height: height}
+}
+
+type compositionLayout struct {
+	size         screenSize
+	frameWidth   int
+	frameRow     int
+	frameColumn  int
+	frameRows    int
+	showLogo     bool
+	logoRow      int
+	logoColumn   int
+	compositionW int
+	compositionH int
+}
+
+func calculateComposition(width, height int) compositionLayout {
+	size := normalizedScreenSize(width, height)
+	frameWidth := effectiveFrameWidth(size.width)
+	frameRows := minInt(3, size.height)
+	logoWidth := wordmarkWidth()
+	showLogo := wordmarkFits(size.width, size.height)
+
+	compositionWidth := frameWidth
+	compositionHeight := frameRows
+	if showLogo {
+		compositionWidth = maxInt(compositionWidth, logoWidth)
+		compositionHeight = 7
+	}
+
+	top := upperThirdTop(size.height, compositionHeight)
+	left := centeredStart(size.width, compositionWidth)
+	layout := compositionLayout{
+		size:         size,
+		frameWidth:   frameWidth,
+		frameRows:    frameRows,
+		showLogo:     showLogo,
+		compositionW: compositionWidth,
+		compositionH: compositionHeight,
+		frameRow:     top,
+		frameColumn:  left + (compositionWidth-frameWidth)/2,
+	}
+	if showLogo {
+		layout.logoRow = top
+		layout.logoColumn = left + (compositionWidth-logoWidth)/2
+		layout.frameRow = top + 4
+	}
+	return layout
+}
+
+func upperThirdTop(height, compositionHeight int) int {
+	if compositionHeight > height {
+		compositionHeight = height
+	}
+	center := maxInt(1, height/3)
+	top := center - (compositionHeight-1)/2
+	if top < 1 {
+		top = 1
+	}
+	lastTop := height - compositionHeight + 1
+	if top > lastTop {
+		top = lastTop
+	}
+	return top
+}
+
+func centeredStart(available, content int) int {
+	if content >= available {
+		return 1
+	}
+	return (available-content)/2 + 1
+}
+
+func cursorPosition(row, column int) string {
+	return fmt.Sprintf("\x1b[%d;%dH", maxInt(1, row), maxInt(1, column))
+}
+
+type alternateRenderer struct {
+	writer io.Writer
+	layout compositionLayout
+}
+
+func newAlternateRenderer(writer io.Writer, width, height int) *alternateRenderer {
+	return &alternateRenderer{writer: writer, layout: calculateComposition(width, height)}
+}
+
+func (r *alternateRenderer) resize(width, height int) {
+	r.layout = calculateComposition(width, height)
+}
+
+func (r *alternateRenderer) drawLogoOnly() error {
+	if !r.layout.showLogo {
 		return nil
 	}
-
-	var frame strings.Builder
-	if f.initialized && !f.anchorValid {
-		if err := f.resetViewport(); err != nil {
-			return err
-		}
-	}
-	if f.initialized {
-		frame.WriteByte('\r')
-		if f.lineCount > 1 {
-			frame.WriteString("\x1b[")
-			frame.WriteString(strconv.Itoa(f.lineCount - 1))
-			frame.WriteByte('A')
-		}
-	}
-	for i, line := range lines {
-		if f.initialized {
-			frame.WriteString(ansiClearLine)
-		}
-		frame.WriteString(line)
-		if i < len(lines)-1 {
-			frame.WriteString("\r\n")
-		}
-	}
-
-	_, err := io.WriteString(f.writer, frame.String())
-	if err == nil {
-		f.initialized = true
-		f.anchorValid = true
-		f.lineCount = len(lines)
-	}
+	_, err := io.WriteString(r.writer, renderPositionedLines(strings.Split(wordmark, "\n"), r.layout.logoRow, r.layout.logoColumn, r.layout.size, false))
 	return err
 }
 
-func (f *frameWriter) clear() error {
-	if !f.initialized {
-		return nil
-	}
-	if !f.anchorValid {
-		return f.resetViewport()
-	}
+func (r *alternateRenderer) drawPacer(lines []string) error {
+	_, err := io.WriteString(r.writer, renderPositionedLines(lines, r.layout.frameRow, r.layout.frameColumn, r.layout.size, true))
+	return err
+}
 
-	var frame strings.Builder
-	frame.WriteByte('\r')
-	if f.lineCount > 1 {
-		frame.WriteString("\x1b[")
-		frame.WriteString(strconv.Itoa(f.lineCount - 1))
-		frame.WriteByte('A')
+func (r *alternateRenderer) redrawComposition(lines []string) error {
+	var output strings.Builder
+	output.WriteString(ansiClearDisplay)
+	output.WriteString(ansiHome)
+	if r.layout.showLogo {
+		output.WriteString(renderPositionedLines(strings.Split(wordmark, "\n"), r.layout.logoRow, r.layout.logoColumn, r.layout.size, false))
 	}
-	for i := 0; i < f.lineCount; i++ {
-		frame.WriteString(ansiClearLine)
-		if i < f.lineCount-1 {
-			frame.WriteString("\r\n")
+	output.WriteString(renderPositionedLines(lines, r.layout.frameRow, r.layout.frameColumn, r.layout.size, true))
+	_, err := io.WriteString(r.writer, output.String())
+	return err
+}
+
+func renderPositionedLines(lines []string, firstRow, column int, size screenSize, clearRows bool) string {
+	var output strings.Builder
+	for index, line := range lines {
+		row := firstRow + index
+		if row < 1 || row > size.height {
+			continue
 		}
+		line = truncateText(line, size.width-column+1)
+		if clearRows {
+			output.WriteString(cursorPosition(row, 1))
+			output.WriteString(ansiClearLine)
+		}
+		output.WriteString(cursorPosition(row, column))
+		output.WriteString(line)
 	}
-
-	_, err := io.WriteString(f.writer, frame.String())
-	if err == nil {
-		f.initialized = false
-		f.anchorValid = true
-		f.lineCount = 0
-	}
-	return err
-}
-
-func (f *frameWriter) invalidateAnchor() {
-	if f.initialized {
-		f.anchorValid = false
-	}
-}
-
-func (f *frameWriter) resetViewport() error {
-	_, err := io.WriteString(f.writer, ansiClearDisplay+ansiHome)
-	if err == nil {
-		f.initialized = false
-		f.anchorValid = true
-		f.lineCount = 0
-	}
-	return err
+	return output.String()
 }
 
 type resizeAction int
@@ -153,56 +236,45 @@ const (
 )
 
 type resizeTracker struct {
-	width        int
-	pendingWidth int
+	current      screenSize
+	pending      screenSize
 	pendingSince time.Time
-	pending      bool
+	resizing     bool
 }
 
-func newResizeTracker(width int) *resizeTracker {
-	return &resizeTracker{width: effectiveFrameWidth(width)}
+func newResizeTracker(width, height int) *resizeTracker {
+	return &resizeTracker{current: normalizedScreenSize(width, height)}
 }
 
-func (r *resizeTracker) observe(width int, now time.Time) resizeAction {
-	effectiveWidth := effectiveFrameWidth(width)
-	if !r.pending && effectiveWidth == r.width {
+func (r *resizeTracker) observe(width, height int, now time.Time) resizeAction {
+	size := normalizedScreenSize(width, height)
+	if !r.resizing && size == r.current {
 		return resizeRender
 	}
-	if !r.pending || effectiveWidth != r.pendingWidth {
-		r.pending = true
-		r.pendingWidth = effectiveWidth
+	if !r.resizing || size != r.pending {
+		r.resizing = true
+		r.pending = size
 		r.pendingSince = now
 		return resizeSuspend
 	}
 	if now.Sub(r.pendingSince) < resizeDebounce {
 		return resizeSuspend
 	}
-	r.width = r.pendingWidth
-	r.pending = false
+	r.current = r.pending
+	r.resizing = false
 	return resizeRecover
 }
 
-func drawInteractiveFrame(frames *frameWriter, resize *resizeTracker, session *Session, now time.Time, terminalWidth int) error {
-	switch resize.observe(terminalWidth, now) {
+func drawInteractiveFrame(renderer *alternateRenderer, resize *resizeTracker, session *Session, now time.Time, width, height int) error {
+	switch resize.observe(width, height, now) {
 	case resizeSuspend:
-		frames.invalidateAnchor()
 		return nil
 	case resizeRecover:
-		if err := frames.resetViewport(); err != nil {
-			return err
-		}
+		renderer.resize(resize.current.width, resize.current.height)
+		return renderer.redrawComposition(renderCurrentFrame(session, now, renderer.layout.frameWidth))
+	default:
+		return renderer.drawPacer(renderCurrentFrame(session, now, renderer.layout.frameWidth))
 	}
-	return frames.write(renderCurrentFrame(session, now, resize.width))
-}
-
-func prepareInteractiveExit(frames *frameWriter, resize *resizeTracker, now time.Time, terminalWidth int) error {
-	switch resize.observe(terminalWidth, now) {
-	case resizeSuspend:
-		frames.invalidateAnchor()
-	case resizeRecover:
-		return frames.resetViewport()
-	}
-	return nil
 }
 
 type keyEvent struct {
@@ -226,10 +298,11 @@ func runInteractiveSession(practice Practice, stdin, stdout *os.File, sound bool
 			return term.Restore(int(stdin.Fd()), state)
 		},
 	}
+	summary := ""
 	defer func() {
-		runErr = errors.Join(runErr, lifecycle.restore())
+		runErr = errors.Join(runErr, lifecycle.finish(summary))
 	}()
-	if err := lifecycle.hideCursor(); err != nil {
+	if err := lifecycle.start(); err != nil {
 		return true, err
 	}
 
@@ -238,13 +311,10 @@ func runInteractiveSession(practice Practice, stdin, stdout *os.File, sound bool
 	signal.Notify(interrupts, os.Interrupt)
 	defer signal.Stop(interrupts)
 
-	frames := &frameWriter{writer: stdout}
 	width, height := terminalSize(stdout)
-	splashWidth := width
-	showedSplash := false
-	if wordmarkFits(width, height) {
-		showedSplash = true
-		if err := frames.write(strings.Split(wordmark, "\n")); err != nil {
+	renderer := newAlternateRenderer(stdout, width, height)
+	if renderer.layout.showLogo {
+		if err := renderer.drawLogoOnly(); err != nil {
 			return true, err
 		}
 		timer := time.NewTimer(splashTime)
@@ -258,10 +328,12 @@ func runInteractiveSession(practice Practice, stdin, stdout *os.File, sound bool
 					return true, event.err
 				}
 				if isQuitKey(event.key) {
-					return true, finishSplashExit(frames, stdout, practice)
+					summary = splashExitSummary(practice)
+					return true, nil
 				}
 			case <-interrupts:
-				return true, finishSplashExit(frames, stdout, practice)
+				summary = splashExitSummary(practice)
+				return true, nil
 			}
 		}
 	}
@@ -271,44 +343,44 @@ splashComplete:
 	if err != nil {
 		return true, err
 	}
-	width, _ = terminalSize(stdout)
-	if showedSplash && effectiveFrameWidth(width) != effectiveFrameWidth(splashWidth) {
-		if err := frames.resetViewport(); err != nil {
+	width, height = terminalSize(stdout)
+	currentSize := normalizedScreenSize(width, height)
+	if currentSize == renderer.layout.size {
+		if err := renderer.drawPacer(renderCurrentFrame(session, session.StartedAt, renderer.layout.frameWidth)); err != nil {
+			return true, err
+		}
+	} else {
+		renderer.resize(width, height)
+		if err := renderer.redrawComposition(renderCurrentFrame(session, session.StartedAt, renderer.layout.frameWidth)); err != nil {
 			return true, err
 		}
 	}
-	resize := newResizeTracker(width)
-	if err := drawInteractiveFrame(frames, resize, session, session.StartedAt, width); err != nil {
-		return true, err
-	}
+	resize := newResizeTracker(width, height)
 
 	ticker := time.NewTicker(renderInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case now := <-ticker.C:
-			width, _ = terminalSize(stdout)
+			width, height = terminalSize(stdout)
 			starts := session.Advance(now)
 			if err := emitPhaseBell(stdout, sound, starts); err != nil {
 				return true, err
 			}
-			if err := drawInteractiveFrame(frames, resize, session, now, width); err != nil {
+			if err := drawInteractiveFrame(renderer, resize, session, now, width, height); err != nil {
 				return true, err
 			}
 			if session.State == SessionCompleted {
-				return true, finishInteractiveSession(frames, stdout, session, now, true)
+				summary = sessionSummary(session, now, true)
+				return true, nil
 			}
 		case event := <-keys:
 			if event.err != nil {
 				return true, event.err
 			}
 			if isQuitKey(event.key) {
-				now := time.Now()
-				width, _ := terminalSize(stdout)
-				if err := prepareInteractiveExit(frames, resize, now, width); err != nil {
-					return true, err
-				}
-				return true, finishInteractiveSession(frames, stdout, session, now, false)
+				summary = sessionSummary(session, time.Now(), false)
+				return true, nil
 			}
 			if event.key == ' ' {
 				now := time.Now()
@@ -317,21 +389,18 @@ splashComplete:
 				} else if session.State == SessionPaused {
 					session.Resume(now)
 				}
-				width, _ = terminalSize(stdout)
-				if err := drawInteractiveFrame(frames, resize, session, now, width); err != nil {
+				width, height = terminalSize(stdout)
+				if err := drawInteractiveFrame(renderer, resize, session, now, width, height); err != nil {
 					return true, err
 				}
 				if session.State == SessionCompleted {
-					return true, finishInteractiveSession(frames, stdout, session, now, true)
+					summary = sessionSummary(session, now, true)
+					return true, nil
 				}
 			}
 		case <-interrupts:
-			now := time.Now()
-			width, _ := terminalSize(stdout)
-			if err := prepareInteractiveExit(frames, resize, now, width); err != nil {
-				return true, err
-			}
-			return true, finishInteractiveSession(frames, stdout, session, now, false)
+			summary = sessionSummary(session, time.Now(), false)
+			return true, nil
 		}
 	}
 }
@@ -344,20 +413,8 @@ func emitPhaseBell(writer io.Writer, enabled bool, starts []PhaseStart) error {
 	return err
 }
 
-func finishInteractiveSession(frames *frameWriter, writer io.Writer, session *Session, now time.Time, completed bool) error {
-	if err := frames.clear(); err != nil {
-		return err
-	}
-	_, err := io.WriteString(writer, sessionSummary(session, now, completed))
-	return err
-}
-
-func finishSplashExit(frames *frameWriter, writer io.Writer, practice Practice) error {
-	if err := frames.clear(); err != nil {
-		return err
-	}
-	_, err := io.WriteString(writer, "breathe · "+strings.ToUpper(practice.Name)+" · ended after 00:00")
-	return err
+func splashExitSummary(practice Practice) string {
+	return "breathe · " + strings.ToUpper(practice.Name) + " · ended after 00:00"
 }
 
 func readKeys(reader io.Reader) <-chan keyEvent {
@@ -384,20 +441,34 @@ func isQuitKey(key byte) bool {
 
 func terminalSize(output *os.File) (int, int) {
 	width, height, err := term.GetSize(int(output.Fd()))
-	if err != nil || width <= 0 {
+	if err != nil || width <= 0 || height <= 0 {
 		return 80, 24
 	}
 	return width, height
 }
 
 func wordmarkFits(width, height int) bool {
-	if height < 3 {
-		return false
-	}
+	return width >= wordmarkWidth() && height >= brandedMinHeight
+}
+
+func wordmarkWidth() int {
+	width := 0
 	for _, line := range strings.Split(wordmark, "\n") {
-		if textWidth(line) > width {
-			return false
-		}
+		width = maxInt(width, textWidth(line))
 	}
-	return true
+	return width
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

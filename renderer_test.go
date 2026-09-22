@@ -7,7 +7,8 @@ import (
 	"time"
 )
 
-func TestProgressBarPhaseBehavior(t *testing.T) {
+func TestBracketedMeterPhaseBehavior(t *testing.T) {
+	const interiorWidth = preferredMeterInteriorWidth
 	tests := []struct {
 		name       string
 		phase      string
@@ -15,24 +16,141 @@ func TestProgressBarPhaseBehavior(t *testing.T) {
 		wantFilled int
 	}{
 		{name: "inhale begins empty", phase: "Inhale", progress: 0, wantFilled: 0},
-		{name: "inhale fills", phase: "Inhale", progress: 0.75, wantFilled: 6},
-		{name: "exhale begins full", phase: "Exhale", progress: 0, wantFilled: 8},
-		{name: "exhale empties", phase: "Exhale", progress: 0.75, wantFilled: 2},
-		{name: "hold full stays full", phase: "Hold full", progress: 0.75, wantFilled: 8},
+		{name: "inhale fills", phase: "Inhale", progress: 0.75, wantFilled: 15},
+		{name: "exhale begins full", phase: "Exhale", progress: 0, wantFilled: 20},
+		{name: "exhale empties", phase: "Exhale", progress: 0.75, wantFilled: 5},
+		{name: "hold full stays full", phase: "Hold full", progress: 0.75, wantFilled: 20},
 		{name: "hold empty stays empty", phase: "Hold empty", progress: 0.25, wantFilled: 0},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			bar := progressBar(test.phase, test.progress, 8)
-			if got := strings.Count(bar, "█"); got != test.wantFilled {
-				t.Errorf("filled cells = %d, want %d; bar = %q", got, test.wantFilled, bar)
+			meter := breathMeter(test.phase, test.progress, interiorWidth)
+			if !strings.HasPrefix(meter, "[ ") || !strings.HasSuffix(meter, " ]") {
+				t.Fatalf("meter %q is missing brackets or inner padding", meter)
 			}
-			if got := textWidth(bar); got != 8 {
-				t.Errorf("bar width = %d, want 8", got)
+			if got := strings.Count(meter, "░"); got != test.wantFilled {
+				t.Errorf("filled cells = %d, want %d; meter = %q", got, test.wantFilled, meter)
+			}
+			if got, want := textWidth(meter), interiorWidth+meterFixedWidth; got != want {
+				t.Errorf("meter width = %d, want %d", got, want)
+			}
+			track := meterTrack(meter)
+			wantTrack := strings.Repeat("░", test.wantFilled) + strings.Repeat(" ", interiorWidth-test.wantFilled)
+			if track != wantTrack {
+				t.Errorf("track = %q, want contiguous left fill %q", track, wantTrack)
+			}
+			if strings.Contains(meter, "|") {
+				t.Errorf("meter contains stale ASCII fill: %q", meter)
 			}
 		})
 	}
+}
+
+func TestBracketedMeterProgressIsMonotonic(t *testing.T) {
+	const interiorWidth = preferredMeterInteriorWidth
+	previousInhale := -1
+	previousExhale := interiorWidth + 1
+	for step := 0; step <= 20; step++ {
+		progress := float64(step) / 20
+		inhale := breathMeter("Inhale", progress, interiorWidth)
+		exhale := breathMeter("Exhale", progress, interiorWidth)
+		inhaleFilled := strings.Count(inhale, "░")
+		exhaleFilled := strings.Count(exhale, "░")
+		if inhaleFilled < previousInhale {
+			t.Errorf("inhale moved backward at %.2f: %d after %d", progress, inhaleFilled, previousInhale)
+		}
+		if exhaleFilled > previousExhale {
+			t.Errorf("exhale refilled at %.2f: %d after %d", progress, exhaleFilled, previousExhale)
+		}
+		previousInhale = inhaleFilled
+		previousExhale = exhaleFilled
+		for _, meter := range []string{inhale, exhale} {
+			track := meterTrack(meter)
+			filled := strings.Count(track, "░")
+			if want := strings.Repeat("░", filled) + strings.Repeat(" ", interiorWidth-filled); track != want {
+				t.Errorf("meter contains a gap: %q", meter)
+			}
+		}
+	}
+}
+
+func TestBracketedMeterShrinksForNarrowFrames(t *testing.T) {
+	if preferredMeterInteriorWidth != 20 {
+		t.Fatalf("preferred meter interior = %d, want 20", preferredMeterInteriorWidth)
+	}
+	if got := textWidth(breathMeter("Hold empty", 0, preferredMeterInteriorWidth)); got != 24 {
+		t.Fatalf("preferred meter width = %d, want 24", got)
+	}
+	if got := boundedMeterInteriorWidth(100); got != preferredMeterInteriorWidth {
+		t.Errorf("preferred meter interior = %d, want %d", got, preferredMeterInteriorWidth)
+	}
+	for _, available := range []int{1, 2, 8, 20, 100} {
+		interiorWidth := boundedMeterInteriorWidth(available)
+		if interiorWidth > available || interiorWidth > preferredMeterInteriorWidth {
+			t.Errorf("interior width %d exceeds available %d", interiorWidth, available)
+		}
+		if interiorWidth == 0 {
+			continue
+		}
+		meter := breathMeter("Hold empty", 0, interiorWidth)
+		if !strings.HasPrefix(meter, "[ ") || !strings.HasSuffix(meter, " ]") {
+			t.Errorf("narrow meter %q is missing brackets or padding", meter)
+		}
+	}
+}
+
+func meterTrack(meter string) string {
+	runes := []rune(meter)
+	if len(runes) < meterFixedWidth {
+		return ""
+	}
+	return string(runes[2 : len(runes)-2])
+}
+
+func TestPausedFrameRetainsFrozenMeter(t *testing.T) {
+	practice, _ := findPractice("box")
+	session, err := NewSession(practice, testStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.Pause(testStart.Add(2 * time.Second))
+	first := renderSession(session, testStart.Add(2*time.Second), preferredFrameWidth)[1]
+	later := renderSession(session, testStart.Add(time.Hour), preferredFrameWidth)[1]
+	if meterFromMiddleLine(first) != meterFromMiddleLine(later) {
+		t.Errorf("paused meter changed from %q to %q", first, later)
+	}
+	if !strings.Contains(first, " 2.0s · INHALE") || !strings.Contains(later, " 2.0s · INHALE") {
+		t.Errorf("paused phase cue changed: first %q, later %q", first, later)
+	}
+}
+
+func TestNarrowFramedMeterRetainsBracketsAndSeparators(t *testing.T) {
+	practice, _ := findPractice("box")
+	session, err := NewSession(practice, testStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := renderSession(session, testStart, framedMinimum)[1]
+	meter := meterFromMiddleLine(line)
+	if !strings.HasPrefix(meter, "[ ") || !strings.HasSuffix(meter, " ]") {
+		t.Fatalf("narrow framed meter %q is malformed in %q", meter, line)
+	}
+	if got := strings.Count(line, " · "); got != 2 {
+		t.Errorf("narrow framed separator count = %d, want 2: %q", got, line)
+	}
+	if got := textWidth(line); got > framedMinimum {
+		t.Errorf("narrow framed line width = %d, want <= %d: %q", got, framedMinimum, line)
+	}
+}
+
+func meterFromMiddleLine(line string) string {
+	start := strings.Index(line, "[")
+	end := strings.Index(line, "]")
+	if start < 0 || end < start {
+		return ""
+	}
+	return line[start : end+1]
 }
 
 func TestDelayedFrameUsesOnlyFinalLiveState(t *testing.T) {
@@ -118,14 +236,21 @@ func TestFramedLayoutHasStablePhaseGeometry(t *testing.T) {
 			if !strings.HasPrefix(line, "│ ") {
 				t.Fatalf("middle line = %q, want left frame marker", line)
 			}
-			barByte := strings.IndexAny(line, "█░")
+			barByte := strings.Index(line, "[")
+			meterEnd := strings.Index(line, "]")
 			countdownByte := strings.Index(line, formatCountdown(session.PhaseRemaining(testStart.Add(test.at))))
 			labelByte := strings.Index(line, test.label)
-			if barByte < 0 || labelByte < 0 || countdownByte < 0 {
+			if barByte < 0 || meterEnd < barByte || labelByte < 0 || countdownByte < 0 {
 				t.Fatalf("middle line %q is missing bar, label, or countdown", line)
 			}
-			if !(barByte < countdownByte && countdownByte < labelByte) {
-				t.Fatalf("middle line %q does not order bar, countdown, phase label", line)
+			if !(barByte < meterEnd && meterEnd < countdownByte && countdownByte < labelByte) {
+				t.Fatalf("middle line %q does not order meter, countdown, phase label", line)
+			}
+			if got := line[meterEnd+1 : countdownByte]; got != " · " {
+				t.Errorf("meter/countdown separator = %q, want %q", got, " · ")
+			}
+			if got := strings.Count(line, " · "); got != 2 {
+				t.Errorf("middle line separator count = %d, want 2: %q", got, line)
 			}
 			gotBar := textWidth(line[:barByte])
 			gotCountdown := textWidth(line[:countdownByte])
