@@ -17,12 +17,15 @@ const wordmark = `█▄▄▄▄ ▄▄▄▄▄▄▄▄▄▄▄ ▄▄▄▄
 █▄▄▄█▄█     █▄▄▄▄▄█▄▄▄█  █▄▄▄▄█   █▄█▄▄▄▄`
 
 const (
-	ansiHideCursor = "\x1b[?25l"
-	ansiShowCursor = "\x1b[?25h"
-	ansiReset      = "\x1b[0m"
-	ansiClearLine  = "\x1b[2K"
-	splashTime     = 600 * time.Millisecond
-	renderInterval = 50 * time.Millisecond
+	ansiHideCursor   = "\x1b[?25l"
+	ansiShowCursor   = "\x1b[?25h"
+	ansiReset        = "\x1b[0m"
+	ansiClearLine    = "\x1b[2K"
+	ansiClearDisplay = "\x1b[2J"
+	ansiHome         = "\x1b[H"
+	splashTime       = time.Second
+	renderInterval   = 50 * time.Millisecond
+	resizeDebounce   = 200 * time.Millisecond
 )
 
 type terminalLifecycle struct {
@@ -52,6 +55,7 @@ func (l *terminalLifecycle) restore() error {
 type frameWriter struct {
 	writer      io.Writer
 	initialized bool
+	anchorValid bool
 	lineCount   int
 }
 
@@ -61,6 +65,11 @@ func (f *frameWriter) write(lines []string) error {
 	}
 
 	var frame strings.Builder
+	if f.initialized && !f.anchorValid {
+		if err := f.resetViewport(); err != nil {
+			return err
+		}
+	}
 	if f.initialized {
 		frame.WriteByte('\r')
 		if f.lineCount > 1 {
@@ -82,9 +91,118 @@ func (f *frameWriter) write(lines []string) error {
 	_, err := io.WriteString(f.writer, frame.String())
 	if err == nil {
 		f.initialized = true
+		f.anchorValid = true
 		f.lineCount = len(lines)
 	}
 	return err
+}
+
+func (f *frameWriter) clear() error {
+	if !f.initialized {
+		return nil
+	}
+	if !f.anchorValid {
+		return f.resetViewport()
+	}
+
+	var frame strings.Builder
+	frame.WriteByte('\r')
+	if f.lineCount > 1 {
+		frame.WriteString("\x1b[")
+		frame.WriteString(strconv.Itoa(f.lineCount - 1))
+		frame.WriteByte('A')
+	}
+	for i := 0; i < f.lineCount; i++ {
+		frame.WriteString(ansiClearLine)
+		if i < f.lineCount-1 {
+			frame.WriteString("\r\n")
+		}
+	}
+
+	_, err := io.WriteString(f.writer, frame.String())
+	if err == nil {
+		f.initialized = false
+		f.anchorValid = true
+		f.lineCount = 0
+	}
+	return err
+}
+
+func (f *frameWriter) invalidateAnchor() {
+	if f.initialized {
+		f.anchorValid = false
+	}
+}
+
+func (f *frameWriter) resetViewport() error {
+	_, err := io.WriteString(f.writer, ansiClearDisplay+ansiHome)
+	if err == nil {
+		f.initialized = false
+		f.anchorValid = true
+		f.lineCount = 0
+	}
+	return err
+}
+
+type resizeAction int
+
+const (
+	resizeRender resizeAction = iota
+	resizeSuspend
+	resizeRecover
+)
+
+type resizeTracker struct {
+	width        int
+	pendingWidth int
+	pendingSince time.Time
+	pending      bool
+}
+
+func newResizeTracker(width int) *resizeTracker {
+	return &resizeTracker{width: effectiveFrameWidth(width)}
+}
+
+func (r *resizeTracker) observe(width int, now time.Time) resizeAction {
+	effectiveWidth := effectiveFrameWidth(width)
+	if !r.pending && effectiveWidth == r.width {
+		return resizeRender
+	}
+	if !r.pending || effectiveWidth != r.pendingWidth {
+		r.pending = true
+		r.pendingWidth = effectiveWidth
+		r.pendingSince = now
+		return resizeSuspend
+	}
+	if now.Sub(r.pendingSince) < resizeDebounce {
+		return resizeSuspend
+	}
+	r.width = r.pendingWidth
+	r.pending = false
+	return resizeRecover
+}
+
+func drawInteractiveFrame(frames *frameWriter, resize *resizeTracker, session *Session, now time.Time, terminalWidth int) error {
+	switch resize.observe(terminalWidth, now) {
+	case resizeSuspend:
+		frames.invalidateAnchor()
+		return nil
+	case resizeRecover:
+		if err := frames.resetViewport(); err != nil {
+			return err
+		}
+	}
+	return frames.write(renderCurrentFrame(session, now, resize.width))
+}
+
+func prepareInteractiveExit(frames *frameWriter, resize *resizeTracker, now time.Time, terminalWidth int) error {
+	switch resize.observe(terminalWidth, now) {
+	case resizeSuspend:
+		frames.invalidateAnchor()
+	case resizeRecover:
+		return frames.resetViewport()
+	}
+	return nil
 }
 
 type keyEvent struct {
@@ -96,7 +214,7 @@ func interactiveTerminal(stdin, stdout *os.File) bool {
 	return term.IsTerminal(int(stdin.Fd())) && term.IsTerminal(int(stdout.Fd()))
 }
 
-func runInteractiveSession(practice Practice, stdin, stdout *os.File) (handled bool, runErr error) {
+func runInteractiveSession(practice Practice, stdin, stdout *os.File, sound bool) (handled bool, runErr error) {
 	state, err := term.MakeRaw(int(stdin.Fd()))
 	if err != nil {
 		return false, nil
@@ -122,7 +240,10 @@ func runInteractiveSession(practice Practice, stdin, stdout *os.File) (handled b
 
 	frames := &frameWriter{writer: stdout}
 	width, height := terminalSize(stdout)
+	splashWidth := width
+	showedSplash := false
 	if wordmarkFits(width, height) {
+		showedSplash = true
 		if err := frames.write(strings.Split(wordmark, "\n")); err != nil {
 			return true, err
 		}
@@ -137,10 +258,10 @@ func runInteractiveSession(practice Practice, stdin, stdout *os.File) (handled b
 					return true, event.err
 				}
 				if isQuitKey(event.key) {
-					return true, nil
+					return true, finishSplashExit(frames, stdout, practice)
 				}
 			case <-interrupts:
-				return true, nil
+				return true, finishSplashExit(frames, stdout, practice)
 			}
 		}
 	}
@@ -151,7 +272,13 @@ splashComplete:
 		return true, err
 	}
 	width, _ = terminalSize(stdout)
-	if err := frames.write(renderSession(session, session.StartedAt, width)); err != nil {
+	if showedSplash && effectiveFrameWidth(width) != effectiveFrameWidth(splashWidth) {
+		if err := frames.resetViewport(); err != nil {
+			return true, err
+		}
+	}
+	resize := newResizeTracker(width)
+	if err := drawInteractiveFrame(frames, resize, session, session.StartedAt, width); err != nil {
 		return true, err
 	}
 
@@ -161,18 +288,27 @@ splashComplete:
 		select {
 		case now := <-ticker.C:
 			width, _ = terminalSize(stdout)
-			if err := frames.write(advanceLiveFrame(session, now, width)); err != nil {
+			starts := session.Advance(now)
+			if err := emitPhaseBell(stdout, sound, starts); err != nil {
+				return true, err
+			}
+			if err := drawInteractiveFrame(frames, resize, session, now, width); err != nil {
 				return true, err
 			}
 			if session.State == SessionCompleted {
-				return true, nil
+				return true, finishInteractiveSession(frames, stdout, session, now, true)
 			}
 		case event := <-keys:
 			if event.err != nil {
 				return true, event.err
 			}
 			if isQuitKey(event.key) {
-				return true, nil
+				now := time.Now()
+				width, _ := terminalSize(stdout)
+				if err := prepareInteractiveExit(frames, resize, now, width); err != nil {
+					return true, err
+				}
+				return true, finishInteractiveSession(frames, stdout, session, now, false)
 			}
 			if event.key == ' ' {
 				now := time.Now()
@@ -182,17 +318,46 @@ splashComplete:
 					session.Resume(now)
 				}
 				width, _ = terminalSize(stdout)
-				if err := frames.write(renderCurrentFrame(session, now, width)); err != nil {
+				if err := drawInteractiveFrame(frames, resize, session, now, width); err != nil {
 					return true, err
 				}
 				if session.State == SessionCompleted {
-					return true, nil
+					return true, finishInteractiveSession(frames, stdout, session, now, true)
 				}
 			}
 		case <-interrupts:
-			return true, nil
+			now := time.Now()
+			width, _ := terminalSize(stdout)
+			if err := prepareInteractiveExit(frames, resize, now, width); err != nil {
+				return true, err
+			}
+			return true, finishInteractiveSession(frames, stdout, session, now, false)
 		}
 	}
+}
+
+func emitPhaseBell(writer io.Writer, enabled bool, starts []PhaseStart) error {
+	if !enabled || len(starts) == 0 {
+		return nil
+	}
+	_, err := io.WriteString(writer, "\a")
+	return err
+}
+
+func finishInteractiveSession(frames *frameWriter, writer io.Writer, session *Session, now time.Time, completed bool) error {
+	if err := frames.clear(); err != nil {
+		return err
+	}
+	_, err := io.WriteString(writer, sessionSummary(session, now, completed))
+	return err
+}
+
+func finishSplashExit(frames *frameWriter, writer io.Writer, practice Practice) error {
+	if err := frames.clear(); err != nil {
+		return err
+	}
+	_, err := io.WriteString(writer, "breathe · "+strings.ToUpper(practice.Name)+" · ended after 00:00")
+	return err
 }
 
 func readKeys(reader io.Reader) <-chan keyEvent {

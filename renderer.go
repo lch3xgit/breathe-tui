@@ -7,7 +7,13 @@ import (
 	"time"
 )
 
-const wideLayoutMinimum = 36
+const (
+	phaseLabelWidth     = len("HOLD EMPTY")
+	countdownWidth      = len("8.0s")
+	preferredBarMax     = 24
+	preferredFrameWidth = 52
+	framedMinimum       = 28
+)
 
 func advanceLiveFrame(session *Session, now time.Time, width int) []string {
 	session.Advance(now)
@@ -15,6 +21,7 @@ func advanceLiveFrame(session *Session, now time.Time, width int) []string {
 }
 
 func renderCurrentFrame(session *Session, now time.Time, width int) []string {
+	width = effectiveFrameWidth(width)
 	if session.State == SessionCompleted {
 		return renderCompleted(session, width)
 	}
@@ -22,59 +29,137 @@ func renderCurrentFrame(session *Session, now time.Time, width int) []string {
 }
 
 func renderSession(session *Session, now time.Time, width int) []string {
-	phase := strings.ToUpper(session.CurrentPhase.Name)
-	phaseText := phase + " · " + formatCountdown(session.PhaseRemaining(now))
-	metadata := sessionMetadata(session, now)
+	width = effectiveFrameWidth(width)
+	header := sessionMetadata(session, now)
 	controls := "space pause · q quit"
 	if session.State == SessionPaused {
 		controls = "space resume · q quit"
 	}
 
-	var lines []string
-	if width >= wideLayoutMinimum {
-		barSpace := width - textWidth(phaseText) - 2
-		barWidth := boundedBarWidth(barSpace)
-		phaseLine := phaseText
-		if barWidth > 0 {
-			phaseLine += "  " + progressBar(session.CurrentPhase.Name, session.PhaseProgress(now), barWidth)
-		}
-		lines = []string{metadata, phaseLine, controls}
-	} else {
-		barWidth := boundedBarWidth(width)
-		bar := ""
-		if barWidth > 0 {
-			bar = progressBar(session.CurrentPhase.Name, session.PhaseProgress(now), barWidth)
-		}
-		thirdLine := metadata
-		if session.State == SessionPaused {
-			thirdLine = "PAUSED · " + strings.ToUpper(session.Practice.Name) + " · space resume"
-		}
-		lines = []string{phaseText, bar, thirdLine}
+	if width < framedMinimum {
+		return renderNarrowFrame(session, now, width, header, controls)
 	}
 
-	return fitLines(lines, width)
+	return fitLines([]string{
+		framedHeader(header, width),
+		framedMiddle(session, now, width),
+		framedFooter(controls, width),
+	}, width)
 }
 
 func renderCompleted(session *Session, width int) []string {
+	width = effectiveFrameWidth(width)
 	return fitLines([]string{
-		strings.ToUpper(session.Practice.Name),
-		fmt.Sprintf("COMPLETE · %d cycles", session.CompletedCycles),
-		"",
+		framedHeader(strings.ToUpper(session.Practice.Name)+" · complete", width),
+		"│ " + fmt.Sprintf("complete · %s", formatClock(session.ScheduledEnd().Sub(session.StartedAt))),
+		framedFooter("q quit", width),
 	}, width)
+}
+
+func renderNarrowFrame(session *Session, now time.Time, width int, header, controls string) []string {
+	phaseCue := compactPhaseCue(session, now)
+	if width <= 0 {
+		return []string{"", "", ""}
+	}
+	if width == 1 {
+		return []string{"┌", "│", "└"}
+	}
+	if width < 2+phaseLabelWidth+3+countdownWidth {
+		return fitLines([]string{
+			"┌─" + compactHeader(header),
+			"│ " + phaseCue,
+			"└─" + compactControls(controls),
+		}, width)
+	}
+	return fitLines([]string{
+		framedHeader(compactHeader(header), width),
+		"│ " + phaseCue,
+		framedFooter(compactControls(controls), width),
+	}, width)
+}
+
+func framedHeader(header string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if width == 1 {
+		return "┌"
+	}
+	prefix := "┌─"
+	if width == 2 {
+		return prefix
+	}
+
+	space := width - textWidth(prefix) - 1
+	content := truncateText(header, space)
+	line := prefix + " " + content
+	remaining := width - textWidth(line)
+	if remaining > 0 {
+		if remaining == 1 {
+			line += "─"
+		} else {
+			line += " " + strings.Repeat("─", remaining-1)
+		}
+	}
+	return line
+}
+
+func framedMiddle(session *Session, now time.Time, width int) string {
+	barWidth := boundedBarWidth(width - middleFixedWidth())
+	return "│ " + progressBar(session.CurrentPhase.Name, session.PhaseProgress(now), barWidth) + "  " + phaseCue(session, now)
+}
+
+func framedFooter(controls string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if width == 1 {
+		return "└"
+	}
+	return truncateText("└─ "+controls, width)
+}
+
+func phaseCue(session *Session, now time.Time) string {
+	label := strings.ToUpper(session.CurrentPhase.Name)
+	return formatCountdown(session.PhaseRemaining(now)) + " · " + label
+}
+
+func compactPhaseCue(session *Session, now time.Time) string {
+	return strings.ToUpper(session.CurrentPhase.Name) + " · " + formatCountdown(session.PhaseRemaining(now))
+}
+
+func middleFixedWidth() int {
+	return textWidth("│ ") + textWidth("  ") + countdownWidth + textWidth(" · ") + phaseLabelWidth
+}
+
+func effectiveFrameWidth(width int) int {
+	if width > preferredFrameWidth {
+		return preferredFrameWidth
+	}
+	return width
 }
 
 func sessionMetadata(session *Session, now time.Time) string {
 	remaining := formatClock(session.SessionRemaining(now))
-	var metadata string
+	name := strings.ToUpper(session.Practice.Name)
 	if session.TargetCycles > 0 {
-		metadata = fmt.Sprintf("%s · breath %d/%d · %s remaining", strings.ToUpper(session.Practice.Name), session.CurrentCycle(), session.TargetCycles, remaining)
-	} else {
-		metadata = fmt.Sprintf("%s · %s remaining", strings.ToUpper(session.Practice.Name), remaining)
+		if session.State == SessionPaused {
+			return fmt.Sprintf("%s · PAUSED · breath %d/%d · %s remaining", name, session.CurrentCycle(), session.TargetCycles, remaining)
+		}
+		return fmt.Sprintf("%s · breath %d/%d · %s remaining", name, session.CurrentCycle(), session.TargetCycles, remaining)
 	}
 	if session.State == SessionPaused {
-		return "PAUSED · " + metadata
+		return fmt.Sprintf("%s · PAUSED · %s remaining", name, remaining)
 	}
-	return metadata
+	return fmt.Sprintf("%s · %s remaining", name, remaining)
+}
+
+func compactHeader(header string) string {
+	return strings.Replace(header, " remaining", "", 1)
+}
+
+func compactControls(controls string) string {
+	return strings.Replace(controls, "space ", "", 1)
 }
 
 func progressBar(phaseName string, progress float64, width int) string {
@@ -106,8 +191,8 @@ func boundedBarWidth(available int) int {
 	if available <= 0 {
 		return 0
 	}
-	if available > 24 {
-		return 24
+	if available > preferredBarMax {
+		return preferredBarMax
 	}
 	return available
 }
@@ -126,6 +211,18 @@ func formatClock(duration time.Duration) string {
 		seconds = 0
 	}
 	return fmt.Sprintf("%02d:%02d", seconds/60, seconds%60)
+}
+
+func sessionSummary(session *Session, now time.Time, completed bool) string {
+	name := strings.ToUpper(session.Practice.Name)
+	if completed {
+		return fmt.Sprintf("breathe · %s · complete · %s", name, formatClock(session.ScheduledEnd().Sub(session.StartedAt)))
+	}
+	elapsed := session.activeTime(now).Sub(session.StartedAt)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return fmt.Sprintf("breathe · %s · ended after %s", name, formatClock(elapsed))
 }
 
 func fitLines(lines []string, width int) []string {

@@ -91,3 +91,127 @@ func TestNarrowRenderingNeverExceedsWidth(t *testing.T) {
 		})
 	}
 }
+
+func TestFramedLayoutHasStablePhaseGeometry(t *testing.T) {
+	practice, _ := findPractice("box")
+	tests := []struct {
+		name  string
+		at    time.Duration
+		label string
+	}{
+		{name: "inhale", at: 0, label: "INHALE"},
+		{name: "hold full", at: 4 * time.Second, label: "HOLD FULL"},
+		{name: "exhale", at: 8 * time.Second, label: "EXHALE"},
+		{name: "hold empty", at: 12 * time.Second, label: "HOLD EMPTY"},
+	}
+
+	const width = 80
+	var barStart, countdownStart int
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session, err := NewSession(practice, testStart)
+			if err != nil {
+				t.Fatal(err)
+			}
+			frame := advanceLiveFrame(session, testStart.Add(test.at), width)
+			line := frame[1]
+			if !strings.HasPrefix(line, "│ ") {
+				t.Fatalf("middle line = %q, want left frame marker", line)
+			}
+			barByte := strings.IndexAny(line, "█░")
+			countdownByte := strings.Index(line, formatCountdown(session.PhaseRemaining(testStart.Add(test.at))))
+			labelByte := strings.Index(line, test.label)
+			if barByte < 0 || labelByte < 0 || countdownByte < 0 {
+				t.Fatalf("middle line %q is missing bar, label, or countdown", line)
+			}
+			if !(barByte < countdownByte && countdownByte < labelByte) {
+				t.Fatalf("middle line %q does not order bar, countdown, phase label", line)
+			}
+			gotBar := textWidth(line[:barByte])
+			gotCountdown := textWidth(line[:countdownByte])
+			if test.at == 0 {
+				barStart, countdownStart = gotBar, gotCountdown
+			}
+			if gotBar != barStart || gotCountdown != countdownStart {
+				t.Errorf("positions = bar %d, countdown %d; want %d, %d", gotBar, gotCountdown, barStart, countdownStart)
+			}
+			if got, want := phaseCue(session, testStart.Add(test.at)), formatCountdown(session.PhaseRemaining(testStart.Add(test.at)))+" · "+test.label; got != want {
+				t.Errorf("phase cue = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestFramedHeaderRulesAndPausedPresentation(t *testing.T) {
+	practice, _ := findPractice("box")
+	session, err := NewSession(practice, testStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.Pause(testStart.Add(time.Second))
+	frame := renderSession(session, testStart.Add(time.Hour), preferredFrameWidth)
+	if !strings.HasPrefix(frame[0], "┌─") || !strings.Contains(frame[0], "PAUSED") {
+		t.Errorf("header = %q, want framed PAUSED header", frame[0])
+	}
+	if !strings.Contains(frame[2], "space resume") {
+		t.Errorf("controls = %q, want space resume", frame[2])
+	}
+	if !strings.Contains(frame[0], "─") || textWidth(frame[0]) != preferredFrameWidth {
+		t.Errorf("header = %q, want width %d with decorative rule", frame[0], preferredFrameWidth)
+	}
+}
+
+func TestWideFramesUsePreferredCapAndStableGeometry(t *testing.T) {
+	practice, _ := findPractice("box")
+	session, err := NewSession(practice, testStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capped := renderSession(session, testStart, preferredFrameWidth)
+	for _, width := range []int{80, 120, 200} {
+		frame := renderSession(session, testStart, width)
+		if strings.Join(frame, "\n") != strings.Join(capped, "\n") {
+			t.Errorf("width %d frame differs from capped geometry:\n%q\nwant\n%q", width, frame, capped)
+		}
+		for _, line := range frame {
+			if got := textWidth(line); got > preferredFrameWidth {
+				t.Errorf("width %d frame line has width %d, cap %d", width, got, preferredFrameWidth)
+			}
+		}
+	}
+}
+
+func TestFramedRenderingNeverExceedsWidth(t *testing.T) {
+	practice, _ := findPractice("478")
+	session, err := NewSession(practice, testStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, width := range []int{1, 2, 8, 16, 27, 28, 44, 80} {
+		t.Run(strconv.Itoa(width), func(t *testing.T) {
+			frame := renderSession(session, testStart, width)
+			for _, line := range frame {
+				if got := textWidth(line); got > width {
+					t.Errorf("line width = %d, want <= %d: %q", got, width, line)
+				}
+			}
+		})
+	}
+}
+
+func TestSummaryUsesActiveTimeAndCompletedDuration(t *testing.T) {
+	practice, _ := findPractice("box")
+	session, err := NewSession(practice, testStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.Pause(testStart.Add(10 * time.Second))
+	session.Resume(testStart.Add(110 * time.Second))
+	if got, want := sessionSummary(session, testStart.Add(142*time.Second), false), "breathe · BOX BREATH · ended after 00:42"; got != want {
+		t.Errorf("early summary = %q, want %q", got, want)
+	}
+	session.Advance(session.ScheduledEnd())
+	if got, want := sessionSummary(session, session.ScheduledEnd(), true), "breathe · BOX BREATH · complete · 05:04"; got != want {
+		t.Errorf("completion summary = %q, want %q", got, want)
+	}
+}

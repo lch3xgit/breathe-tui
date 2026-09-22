@@ -16,6 +16,40 @@ func TestDefaultCommandSelectsCoherence(t *testing.T) {
 	}
 }
 
+func TestSoundOptionSelectsPracticeInEitherOrder(t *testing.T) {
+	tests := [][]string{
+		{"--sound"},
+		{"--sound", "coherence"},
+		{"coherence", "--sound"},
+		{"--sound", "box"},
+		{"478", "--sound"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			cmd, err := parseCommand(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cmd.sound {
+				t.Error("sound = false, want true")
+			}
+			if cmd.kind != commandRun {
+				t.Errorf("kind = %v, want commandRun", cmd.kind)
+			}
+		})
+	}
+}
+
+func TestSoundOptionDefaultsToCoherence(t *testing.T) {
+	cmd, err := parseCommand([]string{"--sound"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.practice.Slug != "coherence" {
+		t.Errorf("practice = %q, want coherence", cmd.practice.Slug)
+	}
+}
+
 func TestPracticeCommands(t *testing.T) {
 	for _, slug := range practiceSlugs() {
 		t.Run(slug, func(t *testing.T) {
@@ -57,6 +91,26 @@ func TestExtraArgumentsReturnUsageError(t *testing.T) {
 	}
 }
 
+func TestUnknownAndConflictingFlagsReturnUsageErrors(t *testing.T) {
+	tests := [][]string{
+		{"--unknown"},
+		{"--sound", "--sound"},
+		{"calm", "box"},
+		{"--sound", "calm", "box"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := runCLI(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("runCLI(%v) exit code = 0, want nonzero", args)
+			}
+			if !strings.Contains(stderr.String(), "Usage:") {
+				t.Errorf("stderr = %q, want usage", stderr.String())
+			}
+		})
+	}
+}
+
 func TestHelpAndVersionDoNotStartSession(t *testing.T) {
 	tests := []struct {
 		arg  string
@@ -83,6 +137,19 @@ func TestHelpAndVersionDoNotStartSession(t *testing.T) {
 			if strings.Contains(stdout.String(), "\x1b[") {
 				t.Errorf("stdout = %q, contains ANSI cursor controls", stdout.String())
 			}
+			if strings.Contains(stdout.String(), "\a") {
+				t.Errorf("stdout = %q, contains a terminal bell byte", stdout.String())
+			}
 		})
+	}
+}
+
+func TestHelpDescribesTerminalBell(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runCLI([]string{"help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "terminal bell") {
+		t.Errorf("help = %q, does not describe terminal bell", stdout.String())
 	}
 }
